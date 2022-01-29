@@ -336,7 +336,7 @@ is used instead."
      (car (apply #'process-lines
                  "git" "log" "-n1" "--first-parent"
                  "--pretty=format:%cd" "--date=unix"
-                 rev "--" (mapcar #'car (package-build-expand-files-spec rcp)))))))
+                 rev "--" (mapcar #'car (package-build-expand-files-spec rcp nil t)))))))
 
 (cl-defmethod package-build--used-url ((rcp package-git-recipe))
   (let ((default-directory (package-recipe--working-tree rcp)))
@@ -387,7 +387,7 @@ is used instead."
            (car (apply #'process-lines
                        "hg" "log" "--limit" "1" "--template" "{date|hgdate}\n"
                        `(,@(and rev (list "--rev" rev))
-                         ,@(mapcar #'car (package-build-expand-files-spec rcp)))))
+                         ,@(mapcar #'car (package-build-expand-files-spec rcp nil t)))))
            " ")))))
 
 (cl-defmethod package-build--used-url ((rcp package-hg-recipe))
@@ -654,12 +654,13 @@ still be renamed."
   (when subdir
     (error "%s: Non-nil SUBDIR is no longer supported"
            'package-build-expand-file-specs))
-  (package-build-expand-files-spec nil (not allow-empty) repo spec))
+  (package-build-expand-files-spec nil (not allow-empty) nil repo spec))
 (make-obsolete 'package-build-expand-file-specs
                'package-build-expand-files-spec
                "Package-Build 3.2")
 
-(defun package-build-expand-files-spec (rcp &optional assert repo spec)
+(defun package-build-expand-files-spec (rcp &optional assert include-inputs
+                                            repo spec)
   "Return an alist of files of package RCP to be included in tarball.
 
 Each element has the form (SOURCE . DESTINATION), where SOURCE
@@ -674,6 +675,11 @@ If optional ASSERT is non-nil, then raise an error if nil would
 be returned.  If ASSERT and `files' are both non-nil and using
 `files' results in the same set of files as the default spec,
 then show a warning.
+
+If optional INCLUDE-INPUTS is non-nil, then include files that
+are not to be included in the tarball but which still effect the
+outcome.  This is used when determining the last commit that
+modified any relevant file.
 
 A files specification is a list.  Its elements are processed in
 order and can have the following form:
@@ -703,17 +709,25 @@ order and can have the following form:
   returned alist.  Files matched by later elements are not
   affected.
 
+- (:inputs . SPEC)
+
+  A list that begins with `:input' is ignored unless
+  INCLUDE-INPUTS is non-nil (see above), in which case the second
+  and subsequent elements are processes as normal.
+
 \(fn RCP &optional ASSERT)" ; Other arguments only for backward compat.
-  (let ((default-directory (or repo (package-recipe--working-tree rcp)))
-        (spec (or spec (oref rcp files))))
+  (let ((default-directory (package-recipe--working-tree rcp))
+        (spec (oref rcp files)))
     (when (eq :defaults (car spec))
       (setq spec (append package-build-default-files-spec (cdr spec))))
     (let ((files (package-build--expand-files-spec-1
-                  (or spec package-build-default-files-spec))))
+                  (or spec package-build-default-files-spec)
+                  nil include-inputs)))
       (when assert
         (when (and rcp spec
                    (equal files (package-build--expand-files-spec-1
-                                 package-build-default-files-spec)))
+                                 package-build-default-files-spec
+                                 nil include-inputs)))
           (package-build--message
            "Note: %s :files spec is equivalent to the default."
            (oref rcp name)))
@@ -722,7 +736,7 @@ order and can have the following form:
                  default-directory (or spec "default spec"))))
       files)))
 
-(defun package-build--expand-files-spec-1 (spec &optional subdir)
+(defun package-build--expand-files-spec-1 (spec &optional subdir include-inputs)
   (let ((files nil))
     (dolist (entry spec)
       (setq files
@@ -741,11 +755,18 @@ order and can have the following form:
                files
                (package-build--expand-files-spec-1 (cdr entry))
                :key #'car :test #'equal))
+             ((eq (car entry) :inputs)
+              (if include-inputs
+                  (nconc files
+                         (package-build--expand-files-spec-1
+                          (cdr entry) subdir t))
+                files))
              (t
               (nconc files
                      (package-build--expand-files-spec-1
                       (cdr entry)
-                      (concat subdir (car entry) "/")))))))
+                      (concat subdir (car entry) "/")
+                      include-inputs))))))
     files))
 
 (defun package-build--copy-package-files (files source-dir target-dir)
