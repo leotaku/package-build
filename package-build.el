@@ -689,6 +689,13 @@ order and can have the following form:
   A string is glob-expanded to match zero or more files.  Matched
   files are copied to the top-level directory.
 
+- (:rename FROM TO)
+
+  A list that begins with `:rename' causes the file FROM to be
+  renamed and/or moved to TO.  FROM and TO are relative file
+  names (as opposed to globs) and both may contain directory
+  parts.  FROM must exist.
+
 - (SUBDIRECTORY . SPEC)
 
   A list that begins with a string causes the files matched by
@@ -730,12 +737,10 @@ order and can have the following form:
              ((stringp entry)
               (nconc files
                      (mapcar (lambda (f)
-                               (cons f
-                                     (concat subdir
-                                             (replace-regexp-in-string
-                                              "\\.el\\.in\\'"  ".el"
-                                              (file-name-nondirectory f)))))
+                               (cons f (concat subdir (file-name-nondirectory f))))
                              (file-expand-wildcards entry))))
+             ((eq (car entry) :rename)
+              (nconc files (list (cons (nth 1 entry) (nth 2 entry)))))
              ((eq (car entry) :exclude)
               (cl-nset-difference
                files
