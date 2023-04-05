@@ -107,6 +107,8 @@ the version string choosen for COMMIT."
   :set-after '(package-build-stable)
   :type '(radio (function-item package-build-get-tag-version)
                 (function-item package-build-get-timestamp-version)
+                (function-item package-build-get-tag+count-unsafe-version)
+                (function-item package-build-get-tag+count-version)
                 function))
 
 (defcustom package-build-predicate-function nil
@@ -323,6 +325,170 @@ VERSION-STRING has the format \"%Y%m%d.%H%M\"."
          (rev (format "sort(ancestors(%s), -rev)"
                       (or commit (format "max(branch(%s))" branch)))))
     (package-build--select-commit rcp rev nil)))
+
+;;;; Release+Timestamp
+
+(defun package-build-get-tag+timestamp-version (rcp)
+  "Determine version string in the \"VERSION.0.TIMESTAMP\" format for RCP.
+VERSION derives from the largest version tag.  TIMESTAMP is the
+COMMITTER-DATE for the identified last relevant commit, using
+the format \"%Y%m%d.%H%M\".  Return (COMMIT-HASH COMMITTER-DATE
+VERSION-STRING)."
+  (pcase-let
+      ((`(,_ ,_ ,sversion) (package-build-get-timestamp-version rcp))
+       (`(,tcommit ,ttime ,tversion) (package-build-get-tag-version rcp)))
+    (list tcommit ttime
+          (package-version-join
+           (nconc (if tversion (version-to-list tversion) (list 0 0))
+                  (list 0)
+                  (version-to-list sversion))))))
+
+;;;; Release+Count
+
+(defun package-build-get-tag+count-unsafe-version (rcp)
+  "Determine version string in the \"VERSION.0.COUNT\" format for RCP.
+VERSION derives from the largest version tag.  COUNT is the
+number of commits since that tag until the identified last
+relevant commit.  If VERSION is the same as for the last snapshot
+then COUNT should be larger now, but sadly that is not guaranteed
+because upstream may have rewritten history.  Return (COMMIT-HASH
+COMMITTER-DATE VERSION-STRING)."
+  (package-build-get-tag+count-version rcp t))
+
+(defun package-build-get-tag+count-version (rcp &optional single-count)
+  "Determine version string in the \"VERSION.0.COUNT\" format for RCP.
+VERSION derives from the largest version tag.  COUNT is the
+number of commits since that tag until the identified last
+relevant commit.  If VERSION is the same as for the last snapshot
+but COUNT is not larger than for that snapshot because upstream
+has rewritten history, then use \"VERSION.0.OLDCOUNT.NEWCOUNT\".
+Return (COMMIT-HASH COMMITTER-DATE VERSION-STRING).
+\n(fn RCP)"
+  (pcase-let*
+      ((`(,scommit ,stime ,_) (package-build-get-timestamp-version rcp))
+       (`(,tcommit ,ttime ,version) (package-build-get-tag-version rcp))
+       (version (and tcommit (version-to-list version)))
+       (merge-base (and tcommit
+                        (package-build--merge-base rcp scommit tcommit)))
+       (ahead (package-build--commit-count rcp scommit tcommit)))
+    (cond
+     ((or (when (not tcommit)
+            ;; No appropriate version tag detected.
+            (setq version (list 0 0))
+            t)
+          (when (not merge-base)
+            ;; As a result of butchered history rewriting, version tags
+            ;; share no history at all with what is currently reachable
+            ;; from the tip.  Completely ignore these unreachable tags and
+            ;; behave as if no version tags existed at all.  Unfortunately
+            ;; that means that users, who have installed a snapshot based
+            ;; on a now abandoned tag, are stuck on that snapshot until
+            ;; upstream creates a new version tag.
+            (setq version (list 0 0))
+            t)
+          ;; Snapshot commit is newer than latest version tag (or there is
+          ;; no version tag).
+          (> ahead 0))
+      (list scommit stime
+            (package-version-join
+             (nconc version
+                    (list 0)
+                    (if single-count
+                        ahead
+                      (package-build--ensure-count-increase
+                       rcp version ahead))))))
+     (t
+      ;; The latest commit, which touched a relevant file, is either the
+      ;; latest release itself, or a commit before that.  Distribute the
+      ;; same commit/release as on the stable channel; as it wouldn not
+      ;; make sense for the development channel to lag behind the latest
+      ;; release.
+      (list tcommit ttime (package-version-join version))))))
+
+(defun package-build--ensure-count-increase (rcp version ahead)
+  (if-let ((previous (cdr (assq (intern (oref rcp name))
+                                (package-build-archive-alist)))))
+      ;; Because upstream may have rewritten history, we cannot be certain
+      ;; that appending the new count of commits would result in a version
+      ;; string that is greater than the version string used for the
+      ;; previous snapshot.
+      (let ((count (list ahead))
+            (pversion (aref previous 0))
+            (pcount nil))
+        (when (and
+               ;; If there is no zero part, then we know that the previous
+               ;; snapshot exactly matched a tagged release (in which case
+               ;; we do not append zero and the count).
+               (memq 0 pversion)
+               ;; Likewise if there is a tag that exactly matches the
+               ;; previous (non-)snapshot, then there is no old count
+               ;; which we would have to compare with the new count.
+               (not (member (mapconcat #'number-to-string pversion ".")
+                            (package-build--list-tags rcp))))
+          ;; The previous snapshot does not exactly match a tagged
+          ;; version.  We must split the version string into its tag
+          ;; and count parts.  The last zero part is the boundary.
+          (let ((split (cl-position 0 pversion :from-end t))
+                (i 0)
+                (tagged nil))
+            (while (< i split)
+              (push (pop pversion) tagged)
+              (cl-incf i))
+            (setq pcount (cdr pversion))
+            (setq pversion (nreverse tagged)))
+          ;; Determine whether we can reset the count or increase it, or
+          ;; whether we have to preserve the old count due to rewritten
+          ;; history in order to ensure that the new snapshot version is
+          ;; greater than the previous snapshot.
+          ;; If the previous and current snapshot commits do not follow
+          ;; the same tag, then their respective counts of commits since
+          ;; their respective tag have no relation to each other and we
+          ;; can simply reset the count, determined above.
+          (when (equal version pversion)
+            ;; If the new count is smaller than the old, then we keep the
+            ;; old count and append the new count as a separate version
+            ;; part.
+            ;;
+            ;; We may have had to do that for previous snapshots, possibly
+            ;; even for multiple consecutive snapshots.  Beginning at the
+            ;; end, scrape of all counts that are smaller than the current
+            ;; count, but leave the others intact.
+            (setq pcount (nreverse pcount))
+            (while (and pcount (> ahead (car pcount)))
+              (pop pcount))
+            (when pcount
+              ;; This snapshot is based on the same tag as the previous
+              ;; snapshot and, due to history rewritting, the count did
+              ;; not increase.
+              (setq count (nreverse (cons (car count) pcount))))))
+        count)
+    (list ahead)))
+
+(cl-defmethod package-build--merge-base ((_rcp package-git-recipe) a b)
+  (car (process-lines "git" "merge-base" a b)))
+
+(cl-defmethod package-build--commit-count ((_rcp package-git-recipe) rev since)
+  (string-to-number
+   (car (if since
+            (process-lines "git" "rev-list" "--count" rev (concat "^" since))
+          (process-lines "git" "rev-list" "--count" rev)))))
+
+(cl-defmethod package-build--commit-ancestor-p ((_rcp package-git-recipe) a b)
+  (zerop (call-process "git" nil nil nil "merge-base" "--is-ancestor" a b)))
+
+(cl-defmethod package-build--merge-base ((_rcp package-hg-recipe) a b)
+  (car (process-lines "hg" "log" "--template" "{node}\\n" "--rev"
+                      (format "ancestor(%s, %s)" a b))))
+
+(cl-defmethod package-build--commit-count ((_rcp package-hg-recipe) rev since)
+  (length (process-lines "hg" "log" "--template" "{rev}\\n" "--rev"
+                         (if since
+                             (format "only(%s, %s)" rev since)
+                           (format "ancestors(%s)" rev)))))
+
+(cl-defmethod package-build--commit-ancestor-p ((_rcp package-hg-recipe) a b)
+  (not (process-lines "hg" "log" "--template" "{rev}\\n" "--rev"
+                      (format "last(only(%s, %s))" a b))))
 
 ;;; Run Process
 
