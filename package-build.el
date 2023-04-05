@@ -622,8 +622,22 @@ value specified in the file \"NAME.el\"."
             :kind       (or kind 'single)
             :url        (lm-homepage)
             :keywords   (lm-keywords-list)
+            ;; As was done for `package-buffer-info' in 4e6f98cd505, we
+            ;; do not add `:maintainers' and instead store either a single
+            ;; cons-cell or a list of cons-cells in the existing property.
+            ;;
+            ;; The comment added in that commit talks about a "single
+            ;; string".  That is wrong, it is a cons-cell, not a string.
+            ;;
+            ;; Storing a cons-cell instead of an alist with a single entry
+            ;; for backward compatibility, is either unnecessary (in case
+            ;; old versions can deal with an alist, which is doubtful) or
+            ;; insufficient (because if there are multiple maintainers,
+            ;; then an alist will be used).  Never-the-less we do the same
+            ;; as they do, for consistency.
             :maintainer (if (fboundp 'lm-maintainers)
-                            (car (lm-maintainers))
+                            (let ((maints (lm-maintainers)))
+                              (if (cdr maints) maints (car maints)))
                           (with-no-warnings
                             (lm-maintainer)))
             :authors    (lm-authors)
@@ -1067,9 +1081,10 @@ If optional PRETTY-PRINT is non-nil, then pretty-print
                       (list :vc-backend 'Hg))
                ,@(when-let* ((branch (oref recipe branch)))
                    (list :branch branch))
-               ,@(when-let* ((maintainer
-                              (cdr (assq :maintainer (aref (cdr entry) 4)))))
-                   (list :maintainer maintainer)))
+               ,@(when-let* ((mx (cdr (assq :maintainer (aref (cdr entry) 4)))))
+                   (if (proper-list-p (car mx))
+                       (list :maintainer (car mx) :maintainers mx)
+                     (list :maintainer mx :maintainers (list mx)))))
              vc-pkgs))))))
     (setq entries (cl-sort entries #'string<
                            :key (lambda (e) (symbol-name (car e)))))
@@ -1163,6 +1178,7 @@ a package."
           :type type
           :props props)))
 
+;; TODO handle multiple maintainers
 (defun package-build--archive-alist-for-json ()
   "Return the archive alist in a form suitable for JSON encoding."
   (cl-flet ((format-person
