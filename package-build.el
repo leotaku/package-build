@@ -199,6 +199,9 @@ disallowed."
 (defvar package-build--inhibit-checkout nil
   "Whether to inhibit checkout.  Useful for testing purposes.")
 
+(defvar package-build--use-head nil
+  "Whether to use HEAD instead of origin/HEAD.  For testing purposes only.")
+
 ;;; Generic Utilities
 
 (defun package-build--message (format-string &rest args)
@@ -295,7 +298,9 @@ VERSION-STRING has the format \"%Y%m%d.%H%M\"."
       ((commit (oref rcp commit))
        (branch (oref rcp branch))
        (branch (and branch (concat "origin/" branch)))
-       (rev (or commit branch "origin/HEAD"))
+       (rev (or commit
+                branch
+                (if package-build--use-head "HEAD" "origin/HEAD")))
        (`(,rev-hash ,rev-time) (package-build--select-commit rcp rev commit))
        (`(,tag-hash ,tag-time) (package-build-get-tag-version rcp)))
     ;; If the latest commit that touches a relevant file is an ancestor of
